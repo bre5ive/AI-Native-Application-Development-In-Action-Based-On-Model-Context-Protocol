@@ -3236,4 +3236,1020 @@ def handle_data_subject_request(server, request):
 def handle_access_request(server, subject_id, request):
     """处理访问请求"""
     # 查找主体数据
-    subject_data = find_subject_data(server, subject_i
+    subject_data = find_subject_data(server, subject_id)
+    
+    # 过滤敏感信息
+    filtered_data = filter_sensitive_data(subject_data)
+    
+    # 格式化数据
+    format = request.get("format", "json")
+    formatted_data = format_subject_data(filtered_data, format)
+    
+    # 记录访问请求
+    log_subject_request(server, "access", subject_id, {
+        "request_id": request.get("request_id"),
+        "timestamp": time.time()
+    })
+    
+    return {
+        "status": "success",
+        "request_id": request.get("request_id"),
+        "data": formatted_data,
+        "timestamp": time.time()
+    }
+
+def handle_erasure_request(server, subject_id, request):
+    """处理删除请求"""
+    # 查找主体数据
+    subject_data = find_subject_data(server, subject_id)
+    
+    # 检查是否有法律依据保留某些数据
+    retention_reasons = check_legal_basis_for_retention(server, subject_id)
+    
+    # 删除数据
+    deleted_data = []
+    retained_data = []
+    
+    for data_item in subject_data:
+        data_type = data_item.get("type")
+        data_id = data_item.get("id")
+        
+        # 检查是否有保留理由
+        if data_type in retention_reasons:
+            retained_data.append({
+                "type": data_type,
+                "id": data_id,
+                "reason": retention_reasons[data_type]
+            })
+            continue
+        
+        # 删除数据
+        try:
+            delete_data(server, data_type, data_id)
+            deleted_data.append({
+                "type": data_type,
+                "id": data_id
+            })
+        except Exception as e:
+            # 记录删除失败
+            log_error(server, f"Failed to delete data: {e}")
+    
+    # 记录删除请求
+    log_subject_request(server, "erasure", subject_id, {
+        "request_id": request.get("request_id"),
+        "deleted_count": len(deleted_data),
+        "retained_count": len(retained_data),
+        "timestamp": time.time()
+    })
+    
+    return {
+        "status": "success",
+        "request_id": request.get("request_id"),
+        "deleted_count": len(deleted_data),
+        "retained_count": len(retained_data),
+        "retained_data": retained_data,
+        "timestamp": time.time()
+    }
+```
+
+#### 同意管理
+
+MCP实现了同意管理功能，确保数据处理基于用户同意：
+
+```python
+def manage_consent(server, action, consent_data):
+    """管理用户同意"""
+    if action == "record":
+        return record_consent(server, consent_data)
+    elif action == "verify":
+        return verify_consent(server, consent_data)
+    elif action == "withdraw":
+        return withdraw_consent(server, consent_data)
+    elif action == "update":
+        return update_consent(server, consent_data)
+    else:
+        raise ValueError(f"Unsupported consent action: {action}")
+
+def record_consent(server, consent_data):
+    """记录用户同意"""
+    # 验证同意数据
+    validate_consent_data(consent_data)
+    
+    # 创建同意记录
+    consent_record = {
+        "id": str(uuid.uuid4()),
+        "subject_id": consent_data.get("subject_id"),
+        "purposes": consent_data.get("purposes", []),
+        "data_categories": consent_data.get("data_categories", []),
+        "granted_at": time.time(),
+        "expires_at": consent_data.get("expires_at"),
+        "source": consent_data.get("source"),
+        "proof": generate_consent_proof(consent_data)
+    }
+    
+    # 存储同意记录
+    store_consent_record(server, consent_record)
+    
+    # 记录同意事件
+    log_consent_event(server, "granted", {
+        "consent_id": consent_record["id"],
+        "subject_id": consent_record["subject_id"],
+        "purposes": consent_record["purposes"]
+    })
+    
+    return {
+        "status": "success",
+        "consent_id": consent_record["id"],
+        "timestamp": consent_record["granted_at"]
+    }
+
+def verify_consent(server, consent_data):
+    """验证用户同意"""
+    subject_id = consent_data.get("subject_id")
+    purpose = consent_data.get("purpose")
+    data_category = consent_data.get("data_category")
+    
+    if not subject_id or not purpose:
+        raise ValueError("Subject ID and purpose are required")
+    
+    # 查找同意记录
+    consent_records = find_consent_records(server, subject_id)
+    
+    # 检查是否有有效的同意
+    for record in consent_records:
+        # 检查是否过期
+        if record.get("expires_at") and record["expires_at"] < time.time():
+            continue
+        
+        # 检查目的
+        if purpose not in record.get("purposes", []):
+            continue
+        
+        # 检查数据类别（如果指定）
+        if data_category and data_category not in record.get("data_categories", []):
+            continue
+        
+        # 找到有效同意
+        return {
+            "status": "valid",
+            "consent_id": record["id"],
+            "granted_at": record["granted_at"],
+            "expires_at": record.get("expires_at")
+        }
+    
+    # 没有找到有效同意
+    return {
+        "status": "invalid",
+        "reason": "No valid consent found"
+    }
+
+def withdraw_consent(server, consent_data):
+    """撤回用户同意"""
+    subject_id = consent_data.get("subject_id")
+    consent_id = consent_data.get("consent_id")
+    purposes = consent_data.get("purposes")
+    
+    if not subject_id:
+        raise ValueError("Subject ID is required")
+    
+    # 如果指定了同意ID
+    if consent_id:
+        # 查找特定同意记录
+        consent_record = get_consent_record(server, consent_id)
+        
+        if not consent_record or consent_record["subject_id"] != subject_id:
+            raise ValueError("Invalid consent ID")
+        
+        # 撤回同意
+        consent_record["withdrawn_at"] = time.time()
+        consent_record["withdrawal_reason"] = consent_data.get("reason")
+        
+        # 更新记录
+        update_consent_record(server, consent_record)
+        
+        # 记录撤回事件
+        log_consent_event(server, "withdrawn", {
+            "consent_id": consent_id,
+            "subject_id": subject_id,
+            "purposes": consent_record["purposes"]
+        })
+        
+        return {
+            "status": "success",
+            "consent_id": consent_id,
+            "timestamp": consent_record["withdrawn_at"]
+        }
+    
+    # 如果指定了目的
+    elif purposes:
+        # 查找所有同意记录
+        consent_records = find_consent_records(server, subject_id)
+        withdrawn_ids = []
+        
+        for record in consent_records:
+            # 检查是否已撤回
+            if "withdrawn_at" in record:
+                continue
+            
+            # 检查目的是否匹配
+            matching_purposes = [p for p in record["purposes"] if p in purposes]
+            if not matching_purposes:
+                continue
+            
+            # 撤回同意
+            record["withdrawn_at"] = time.time()
+            record["withdrawal_reason"] = consent_data.get("reason")
+            record["withdrawn_purposes"] = matching_purposes
+            
+            # 更新记录
+            update_consent_record(server, record)
+            withdrawn_ids.append(record["id"])
+            
+            # 记录撤回事件
+            log_consent_event(server, "withdrawn", {
+                "consent_id": record["id"],
+                "subject_id": subject_id,
+                "purposes": matching_purposes
+            })
+        
+        return {
+            "status": "success",
+            "withdrawn_count": len(withdrawn_ids),
+            "consent_ids": withdrawn_ids,
+            "timestamp": time.time()
+        }
+    
+    else:
+        raise ValueError("Either consent_id or purposes must be specified")
+```
+
+#### 数据处理记录
+
+MCP实现了数据处理活动记录，满足合规要求：
+
+```python
+def record_processing_activity(server, activity_data):
+    """记录数据处理活动"""
+    # 验证活动数据
+    validate_processing_activity(activity_data)
+    
+    # 创建活动记录
+    activity_record = {
+        "id": str(uuid.uuid4()),
+        "type": activity_data.get("type"),
+        "description": activity_data.get("description"),
+        "purposes": activity_data.get("purposes", []),
+        "data_categories": activity_data.get("data_categories", []),
+        "subject_categories": activity_data.get("subject_categories", []),
+        "legal_basis": activity_data.get("legal_basis"),
+        "processors": activity_data.get("processors", []),
+        "transfers": activity_data.get("transfers", []),
+        "retention_period": activity_data.get("retention_period"),
+        "security_measures": activity_data.get("security_measures", []),
+        "created_at": time.time(),
+        "updated_at": time.time()
+    }
+    
+    # 存储活动记录
+    store_processing_activity(server, activity_record)
+    
+    # 记录活动创建事件
+    log_compliance_event(server, "processing_activity_created", {
+        "activity_id": activity_record["id"],
+        "type": activity_record["type"]
+    })
+    
+    return {
+        "status": "success",
+        "activity_id": activity_record["id"],
+        "timestamp": activity_record["created_at"]
+    }
+
+def generate_processing_register(server, format="json"):
+    """生成数据处理活动登记册"""
+    # 获取所有处理活动
+    activities = get_all_processing_activities(server)
+    
+    # 按类型分组
+    grouped_activities = {}
+    for activity in activities:
+        activity_type = activity.get("type", "other")
+        if activity_type not in grouped_activities:
+            grouped_activities[activity_type] = []
+        grouped_activities[activity_type].append(activity)
+    
+    # 创建登记册
+    register = {
+        "organization": server.config.get("organization", {}),
+        "dpo_contact": server.config.get("dpo_contact", {}),
+        "generated_at": time.time(),
+        "activities_count": len(activities),
+        "activities_by_type": grouped_activities
+    }
+    
+    # 格式化输出
+    if format == "json":
+        return json.dumps(register, indent=2)
+    elif format == "pdf":
+        return generate_pdf_register(register)
+    elif format == "csv":
+        return generate_csv_register(register)
+    else:
+        raise ValueError(f"Unsupported format: {format}")
+```
+
+#### 合规性报告
+
+MCP提供了合规性报告功能，帮助组织评估和证明合规性：
+
+```python
+def generate_compliance_report(server, framework, period=None):
+    """生成合规性报告"""
+    # 确定报告期间
+    if not period:
+        # 默认为过去一年
+        end_time = time.time()
+        start_time = end_time - 365 * 24 * 3600
+    else:
+        start_time = period.get("start_time")
+        end_time = period.get("end_time", time.time())
+    
+    # 获取合规框架要求
+    framework_requirements = get_compliance_requirements(framework)
+    
+    # 评估每项要求的合规性
+    compliance_results = {}
+    overall_compliance = True
+    
+    for req_id, requirement in framework_requirements.items():
+        # 评估要求
+        result = assess_requirement_compliance(server, requirement, start_time, end_time)
+        compliance_results[req_id] = result
+        
+        # 更新整体合规性
+        if not result["compliant"]:
+            overall_compliance = False
+    
+    # 生成报告
+    report = {
+        "framework": framework,
+        "organization": server.config.get("organization", {}),
+        "period": {
+            "start_time": start_time,
+            "end_time": end_time
+        },
+        "generated_at": time.time(),
+        "overall_compliance": overall_compliance,
+        "requirements_count": len(framework_requirements),
+        "compliant_count": sum(1 for r in compliance_results.values() if r["compliant"]),
+        "non_compliant_count": sum(1 for r in compliance_results.values() if not r["compliant"]),
+        "results": compliance_results
+    }
+    
+    # 记录报告生成
+    log_compliance_event(server, "report_generated", {
+        "framework": framework,
+        "overall_compliance": overall_compliance
+    })
+    
+    return report
+
+def assess_requirement_compliance(server, requirement, start_time, end_time):
+    """评估特定要求的合规性"""
+    requirement_type = requirement.get("type")
+    
+    if requirement_type == "configuration":
+        return assess_configuration_compliance(server, requirement)
+    elif requirement_type == "log_evidence":
+        return assess_log_evidence_compliance(server, requirement, start_time, end_time)
+    elif requirement_type == "document":
+        return assess_document_compliance(server, requirement)
+    elif requirement_type == "process":
+        return assess_process_compliance(server, requirement)
+    else:
+        return {
+            "compliant": False,
+            "reason": f"Unknown requirement type: {requirement_type}",
+            "evidence": None
+        }
+
+def assess_configuration_compliance(server, requirement):
+    """评估配置合规性"""
+    config_path = requirement.get("config_path")
+    expected_value = requirement.get("expected_value")
+    
+    # 获取当前配置值
+    current_value = get_config_value(server, config_path)
+    
+    # 检查是否符合预期
+    if current_value == expected_value:
+        return {
+            "compliant": True,
+            "evidence": {
+                "config_path": config_path,
+                "current_value": current_value
+            }
+        }
+    else:
+        return {
+            "compliant": False,
+            "reason": "Configuration does not match expected value",
+            "evidence": {
+                "config_path": config_path,
+                "current_value": current_value,
+                "expected_value": expected_value
+            }
+        }
+```
+
+### 3.3.3 隐私保护与透明度平衡
+
+MCP致力于在隐私保护和透明度之间取得平衡，既保护用户隐私，又提供必要的透明度。
+
+#### 隐私设计原则
+
+MCP遵循以下隐私设计原则：
+
+1. **隐私默认设置**：系统默认配置为最高隐私保护级别
+2. **数据最小化**：只收集和处理必要的数据
+3. **目的限制**：数据只用于指定目的
+4. **存储限制**：数据只在必要时间内保存
+5. **透明度**：清晰说明数据处理活动
+6. **用户控制**：用户可以控制其数据
+
+```python
+def apply_privacy_by_design(server):
+    """应用隐私设计原则"""
+    # 配置隐私默认设置
+    server.config["privacy_defaults"] = {
+        "data_collection": "minimal",
+        "data_retention": "shortest",
+        "data_sharing": "none",
+        "user_tracking": "off"
+    }
+    
+    # 配置数据最小化
+    server.config["data_minimization"] = {
+        "enabled": True,
+        "collection_review_required": True,
+        "field_level_justification": True
+    }
+    
+    # 配置目的限制
+    server.config["purpose_limitation"] = {
+        "enabled": True,
+        "purpose_registry_required": True,
+        "purpose_validation_on_access": True
+    }
+    
+    # 配置存储限制
+    server.config["storage_limitation"] = {
+        "enabled": True,
+        "automatic_deletion": True,
+        "default_retention": "1y"
+    }
+    
+    # 配置透明度措施
+    server.config["transparency"] = {
+        "privacy_notice_required": True,
+        "processing_registry_public": True,
+        "user_access_portal": True
+    }
+    
+    # 配置用户控制
+    server.config["user_control"] = {
+        "consent_management": True,
+        "preference_center": True,
+        "data_portability": True,
+        "deletion_requests": True
+    }
+    
+    # 应用配置
+    server.apply_privacy_config()
+```
+
+#### 隐私影响评估
+
+MCP提供了隐私影响评估功能，帮助识别和减轻隐私风险：
+
+```python
+def conduct_privacy_impact_assessment(server, assessment_data):
+    """进行隐私影响评估"""
+    # 验证评估数据
+    validate_pia_data(assessment_data)
+    
+    # 创建评估记录
+    assessment = {
+        "id": str(uuid.uuid4()),
+        "name": assessment_data.get("name"),
+        "description": assessment_data.get("description"),
+        "processing_activities": assessment_data.get("processing_activities", []),
+        "data_types": assessment_data.get("data_types", []),
+        "data_subjects": assessment_data.get("data_subjects", []),
+        "created_at": time.time(),
+        "status": "in_progress",
+        "steps": []
+    }
+    
+    # 执行评估步骤
+    assessment["steps"].append(perform_necessity_assessment(assessment_data))
+    assessment["steps"].append(perform_proportionality_assessment(assessment_data))
+    assessment["steps"].append(identify_privacy_risks(assessment_data))
+    assessment["steps"].append(evaluate_risk_mitigation(assessment_data))
+    
+    # 确定整体结果
+    high_risks = sum(1 for step in assessment["steps"] if step.get("risk_level") == "high")
+    medium_risks = sum(1 for step in assessment["steps"] if step.get("risk_level") == "medium")
+    
+    if high_risks > 0:
+        assessment["overall_risk"] = "high"
+        assessment["status"] = "requires_revision"
+    elif medium_risks > 2:
+        assessment["overall_risk"] = "medium"
+        assessment["status"] = "requires_monitoring"
+    else:
+        assessment["overall_risk"] = "low"
+        assessment["status"] = "approved"
+    
+    # 存储评估
+    store_privacy_assessment(server, assessment)
+    
+    # 记录评估完成
+    log_compliance_event(server, "pia_completed", {
+        "assessment_id": assessment["id"],
+        "overall_risk": assessment["overall_risk"]
+    })
+    
+    return {
+        "status": "success",
+        "assessment_id": assessment["id"],
+        "overall_risk": assessment["overall_risk"],
+        "assessment_status": assessment["status"]
+    }
+
+def identify_privacy_risks(assessment_data):
+    """识别隐私风险"""
+    risks = []
+    
+    # 检查数据类型风险
+    for data_type in assessment_data.get("data_types", []):
+        if data_type.get("sensitive", False):
+            risks.append({
+                "type": "sensitive_data",
+                "description": f"Processing of sensitive data: {data_type.get('name')}",
+                "likelihood": "high",
+                "impact": "high",
+                "risk_level": "high"
+            })
+    
+    # 检查处理活动风险
+    for activity in assessment_data.get("processing_activities", []):
+        # 检查自动化决策
+        if activity.get("automated_decision_making", False):
+            risks.append({
+                "type": "automated_decision",
+                "description": "Automated decision-making that may significantly affect individuals",
+                "likelihood": "medium",
+                "impact": "high",
+                "risk_level": "high"
+            })
+        
+        # 检查大规模处理
+        if activity.get("large_scale", False):
+            risks.append({
+                "type": "large_scale_processing",
+                "description": "Large-scale processing of personal data",
+                "likelihood": "medium",
+                "impact": "medium",
+                "risk_level": "medium"
+            })
+        
+        # 检查监控活动
+        if activity.get("monitoring", False):
+            risks.append({
+                "type": "monitoring",
+                "description": "Systematic monitoring of individuals",
+                "likelihood": "medium",
+                "impact": "high",
+                "risk_level": "high"
+            })
+    
+    # 检查数据主体风险
+    for subject in assessment_data.get("data_subjects", []):
+        if subject.get("vulnerable", False):
+            risks.append({
+                "type": "vulnerable_subjects",
+                "description": f"Processing data of vulnerable individuals: {subject.get('name')}",
+                "likelihood": "medium",
+                "impact": "high",
+                "risk_level": "high"
+            })
+    
+    # 检查数据共享风险
+    for recipient in assessment_data.get("recipients", []):
+        if recipient.get("third_country", False):
+            risks.append({
+                "type": "international_transfer",
+                "description": f"Transfer of data to third country: {recipient.get('name')}",
+                "likelihood": "medium",
+                "impact": "medium",
+                "risk_level": "medium"
+            })
+    
+    return {
+        "step": "risk_identification",
+        "risks": risks,
+        "risk_count": len(risks),
+        "high_risks": sum(1 for r in risks if r["risk_level"] == "high"),
+        "medium_risks": sum(1 for r in risks if r["risk_level"] == "medium"),
+        "low_risks": sum(1 for r in risks if r["risk_level"] == "low"),
+        "risk_level": "high" if any(r["risk_level"] == "high" for r in risks) else
+                     "medium" if any(r["risk_level"] == "medium" for r in risks) else
+                     "low"
+    }
+```
+
+#### 透明度机制
+
+MCP实现了多种透明度机制，向用户说明数据处理活动：
+
+```python
+def generate_privacy_notice(server, notice_config):
+    """生成隐私声明"""
+    # 获取组织信息
+    organization = server.config.get("organization", {})
+    
+    # 获取数据处理活动
+    processing_activities = get_all_processing_activities(server)
+    
+    # 获取数据类别
+    data_categories = get_data_categories(server)
+    
+    # 获取数据主体权利
+    data_subject_rights = server.config.get("data_subject_rights", {})
+    
+    # 创建隐私声明
+    notice = {
+        "organization": {
+            "name": organization.get("name", ""),
+            "contact": organization.get("contact", {}),
+            "dpo_contact": organization.get("dpo_contact", {})
+        },
+        "last_updated": time.time(),
+        "version": notice_config.get("version", "1.0"),
+        "introduction": notice_config.get("introduction", ""),
+        "data_collection": [],
+        "data_uses": [],
+        "data_sharing": [],
+        "data_retention": [],
+        "data_security": notice_config.get("data_security", ""),
+        "data_subject_rights": [],
+        "cookies": notice_config.get("cookies", {}),
+        "changes": notice_config.get("changes", ""),
+        "contact": notice_config.get("contact", {})
+    }
+    
+    # 添加数据收集信息
+    for category in data_categories:
+        notice["data_collection"].append({
+            "category": category.get("name"),
+            "description": category.get("description"),
+            "examples": category.get("examples", []),
+            "source": category.get("source", "directly from you")
+        })
+    
+    # 添加数据使用信息
+    purposes = set()
+    for activity in processing_activities:
+        for purpose in activity.get("purposes", []):
+            purposes.add(purpose)
+    
+    for purpose in purposes:
+        purpose_info = get_purpose_info(server, purpose)
+        notice["data_uses"].append({
+            "purpose": purpose,
+            "description": purpose_info.get("description", ""),
+            "legal_basis": purpose_info.get("legal_basis", ""),
+            "necessary": purpose_info.get("necessary", False)
+        })
+    
+    # 添加数据共享信息
+    recipients = set()
+    for activity in processing_activities:
+        for recipient in activity.get("processors", []) + activity.get("transfers", []):
+            recipients.add(recipient)
+    
+    for recipient in recipients:
+        recipient_info = get_recipient_info(server, recipient)
+        notice["data_sharing"].append({
+            "recipient": recipient,
+            "description": recipient_info.get("description", ""),
+            "purpose": recipient_info.get("purpose", ""),
+            "data_categories": recipient_info.get("data_categories", []),
+            "location": recipient_info.get("location", "")
+        })
+    
+    # 添加数据保留信息
+    retention_policies = get_retention_policies(server)
+    for policy in retention_policies:
+        notice["data_retention"].append({
+            "data_category": policy.get("data_category"),
+            "retention_period": policy.get("retention_period"),
+            "reason": policy.get("reason", "")
+        })
+    
+    # 添加数据主体权利信息
+    for right, enabled in data_subject_rights.items():
+        if enabled:
+            right_info = get_right_info(right)
+            notice["data_subject_rights"].append({
+                "right": right,
+                "description": right_info.get("description", ""),
+                "how_to_exercise": right_info.get("how_to_exercise", "")
+            })
+    
+    # 格式化隐私声明
+    format = notice_config.get("format", "html")
+    return format_privacy_notice(notice, format)
+```
+
+#### 用户控制界面
+
+MCP提供了用户控制界面，让用户管理其数据和隐私设置：
+
+```python
+def generate_privacy_dashboard(server, user_id):
+    """生成用户隐私控制面板"""
+    # 获取用户数据
+    user_data = find_subject_data(server, user_id)
+    
+    # 获取用户同意记录
+    consent_records = find_consent_records(server, user_id)
+    
+    # 获取用户请求历史
+    request_history = get_subject_request_history(server, user_id)
+    
+    # 创建控制面板数据
+    dashboard = {
+        "user_id": user_id,
+        "generated_at": time.time(),
+        "data_summary": {
+            "categories": summarize_data_categories(user_data),
+            "last_updated": get_last_data_update(user_data)
+        },
+        "consent_summary": {
+            "active_consents": [r for r in consent_records if "withdrawn_at" not in r],
+            "withdrawn_consents": [r for r in consent_records if "withdrawn_at" in r],
+            "last_updated": max([r.get("granted_at", 0) for r in consent_records] or [0])
+        },
+        "request_summary": {
+            "total_requests": len(request_history),
+            "by_type": summarize_requests_by_type(request_history),
+            "recent_requests": request_history[:5]
+        },
+        "privacy_controls": generate_privacy_controls(server, user_id),
+        "data_access": {
+            "download_url": generate_data_download_url(server, user_id),
+            "formats": ["json", "csv", "pdf"]
+        }
+    }
+    
+    return dashboard
+
+def generate_privacy_controls(server, user_id):
+    """生成隐私控制选项"""
+    # 获取当前设置
+    current_settings = get_user_privacy_settings(server, user_id)
+    
+    # 获取可用的隐私控制
+    available_controls = server.config.get("privacy_controls", {})
+    
+    controls = []
+    
+    # 添加同意管理控制
+    if available_controls.get("consent_management", False):
+        controls.append({
+            "id": "consent_management",
+            "name": "Consent Management",
+            "description": "Manage what you've consented to",
+            "type": "consent_manager",
+            "current_value": None,
+            "options": None,
+            "url": f"/privacy/consent?user_id={user_id}"
+        })
+    
+    # 添加数据使用控制
+    if available_controls.get("data_usage", False):
+        controls.append({
+            "id": "data_usage",
+            "name": "Data Usage Preferences",
+            "description": "Control how your data is used",
+            "type": "multi_toggle",
+            "current_value": current_settings.get("data_usage", {}),
+            "options": {
+                "marketing": "Use data for marketing",
+                "analytics": "Use data for analytics",
+                "improvement": "Use data for service improvement",
+                "research": "Use data for research"
+            }
+        })
+    
+    # 添加通信偏好控制
+    if available_controls.get("communication", False):
+        controls.append({
+            "id": "communication",
+            "name": "Communication Preferences",
+            "description": "Control how we communicate with you",
+            "type": "multi_toggle",
+            "current_value": current_settings.get("communication", {}),
+            "options": {
+                "email": "Email communications",
+                "sms": "SMS communications",
+                "phone": "Phone communications",
+                "postal": "Postal communications"
+            }
+        })
+    
+    # 添加数据保留控制
+    if available_controls.get("data_retention", False):
+        controls.append({
+            "id": "data_retention",
+            "name": "Data Retention",
+            "description": "Control how long we keep your data",
+            "type": "select",
+            "current_value": current_settings.get("data_retention", "default"),
+            "options": {
+                "default": "Default retention period",
+                "extended": "Extended retention period",
+                "minimum": "Minimum retention period"
+            }
+        })
+    
+    # 添加数据共享控制
+    if available_controls.get("data_sharing", False):
+        controls.append({
+            "id": "data_sharing",
+            "name": "Data Sharing",
+            "description": "Control how your data is shared",
+            "type": "multi_toggle",
+            "current_value": current_settings.get("data_sharing", {}),
+            "options": {
+                "partners": "Share with partners",
+                "affiliates": "Share with affiliates",
+                "third_parties": "Share with third parties",
+                "research": "Share for research purposes"
+            }
+        })
+    
+    return controls
+
+def update_privacy_settings(server, user_id, settings):
+    """更新用户隐私设置"""
+    # 验证设置
+    validate_privacy_settings(settings)
+    
+    # 获取当前设置
+    current_settings = get_user_privacy_settings(server, user_id)
+    
+    # 更新设置
+    updated_settings = {**current_settings}
+    for key, value in settings.items():
+        updated_settings[key] = value
+    
+    # 存储更新后的设置
+    store_user_privacy_settings(server, user_id, updated_settings)
+    
+    # 处理同意变更
+    if "data_usage" in settings:
+        handle_data_usage_consent_changes(server, user_id, current_settings.get("data_usage", {}), settings["data_usage"])
+    
+    if "communication" in settings:
+        handle_communication_consent_changes(server, user_id, current_settings.get("communication", {}), settings["communication"])
+    
+    if "data_sharing" in settings:
+        handle_sharing_consent_changes(server, user_id, current_settings.get("data_sharing", {}), settings["data_sharing"])
+    
+    # 记录设置更新
+    log_privacy_event(server, "settings_updated", {
+        "user_id": user_id,
+        "updated_settings": list(settings.keys())
+    })
+    
+    return {
+        "status": "success",
+        "user_id": user_id,
+        "updated_at": time.time(),
+        "updated_settings": list(settings.keys())
+    }
+```
+
+#### 隐私与透明度平衡策略
+
+MCP实现了隐私与透明度平衡策略，在保护隐私的同时提供必要的透明度：
+
+```python
+def apply_privacy_transparency_balance(server, balance_config):
+    """应用隐私与透明度平衡策略"""
+    # 验证配置
+    validate_balance_config(balance_config)
+    
+    # 设置隐私级别
+    privacy_level = balance_config.get("privacy_level", "balanced")
+    
+    if privacy_level == "privacy_focused":
+        # 隐私优先配置
+        server.config["data_minimization"]["aggressive"] = True
+        server.config["data_retention"]["shortest"] = True
+        server.config["logging"]["minimal"] = True
+        server.config["transparency"]["essential_only"] = True
+    
+    elif privacy_level == "transparency_focused":
+        # 透明度优先配置
+        server.config["data_minimization"]["aggressive"] = False
+        server.config["data_retention"]["shortest"] = False
+        server.config["logging"]["comprehensive"] = True
+        server.config["transparency"]["detailed"] = True
+    
+    else:  # balanced
+        # 平衡配置
+        server.config["data_minimization"]["aggressive"] = False
+        server.config["data_retention"]["shortest"] = False
+        server.config["logging"]["standard"] = True
+        server.config["transparency"]["standard"] = True
+    
+    # 配置特定平衡策略
+    for category, strategy in balance_config.get("category_strategies", {}).items():
+        apply_category_balance_strategy(server, category, strategy)
+    
+    # 应用配置
+    server.apply_privacy_config()
+    
+    # 记录配置更新
+    log_compliance_event(server, "privacy_balance_updated", {
+        "privacy_level": privacy_level,
+        "categories": list(balance_config.get("category_strategies", {}).keys())
+    })
+    
+    return {
+        "status": "success",
+        "privacy_level": privacy_level,
+        "applied_at": time.time()
+    }
+
+def apply_category_balance_strategy(server, category, strategy):
+    """应用特定类别的平衡策略"""
+    if category == "user_data":
+        apply_user_data_balance(server, strategy)
+    elif category == "system_data":
+        apply_system_data_balance(server, strategy)
+    elif category == "analytics_data":
+        apply_analytics_data_balance(server, strategy)
+    elif category == "security_data":
+        apply_security_data_balance(server, strategy)
+    else:
+        raise ValueError(f"Unknown data category: {category}")
+
+def apply_user_data_balance(server, strategy):
+    """应用用户数据平衡策略"""
+    privacy_level = strategy.get("privacy_level", "balanced")
+    
+    # 配置数据收集
+    if privacy_level == "privacy_focused":
+        server.config["user_data"]["collection"] = "minimal"
+        server.config["user_data"]["anonymization"] = "aggressive"
+        server.config["user_data"]["retention"] = "minimal"
+    elif privacy_level == "transparency_focused":
+        server.config["user_data"]["collection"] = "comprehensive"
+        server.config["user_data"]["anonymization"] = "basic"
+        server.config["user_data"]["retention"] = "extended"
+    else:  # balanced
+        server.config["user_data"]["collection"] = "standard"
+        server.config["user_data"]["anonymization"] = "standard"
+        server.config["user_data"]["retention"] = "standard"
+    
+    # 配置透明度措施
+    transparency_level = strategy.get("transparency_level", privacy_level)
+    
+    if transparency_level == "privacy_focused":
+        server.config["user_data"]["notices"] = "minimal"
+        server.config["user_data"]["controls"] = "essential"
+        server.config["user_data"]["access"] = "basic"
+    elif transparency_level == "transparency_focused":
+        server.config["user_data"]["notices"] = "detailed"
+        server.config["user_data"]["controls"] = "comprehensive"
+        server.config["user_data"]["access"] = "full"
+    else:  # balanced
+        server.config["user_data"]["notices"] = "standard"
+        server.config["user_data"]["controls"] = "standard"
+        server.config["user_data"]["access"] = "standard"
+```
+
+## 本章小结
+
+本章深入探讨了MCP的安全架构和隐私保护机制，这是构建可信AI原生应用的关键基础。我们首先介绍了MCP的安全模型设计，包括多层次的安全机制、权限边界与访问控制以及服务器隔离原则。MCP的安全架构基于深度防御策略，通过传输安全、身份认证、会话管理、权限控制、资源访问控制和审计日志等多层次保护，确保系统的安全性和可靠性。
+
+接着，我们详细讨论了MCP的数据隐私保护策略，包括最小权限原则实现、数据脱敏与匿名化技术以及敏感信息处理最佳实践。MCP实现了细粒度的数据访问控制、数据分类与标记、数据使用目的限制和全面的数据访问审计，确保用户数据得到适当保护。同时，MCP提供了多种数据脱敏和匿名化技术，如掩码处理、截断处理、哈希处理、范围替换和随机替换，以及K-匿名性、L-多样性、T-接近度和差分隐私等匿名化技术，保护敏感数据的隐私。
+
+最后，我们探讨了MCP的审计与合规机制，包括操作日志与审计跟踪、合规性保障措施以及隐私保护与透明度平衡。MCP实现了全面的操作日志和审计跟踪机制，记录系统中的所有关键活动，并提供日志完整性保护和异常检测功能。同时，MCP支持多种合规框架，包括GDPR、CCPA、HIPAA、PCI DSS和SOC 2等，并提供数据主体权利支持、同意管理、数据处理记录和合规性报告等功能。在隐私保护与透明度平衡方面，MCP遵循隐私设计原则，提供隐私影响评估、透明度机制和用户控制界面，在保护用户隐私的同时提供必要的透明度。
+
+通过本章的学习，读者应该已经掌握了如何构建安全可靠的MCP应用，保护用户隐私并满足合规要求。这些安全和隐私保护机制是MCP架构的重要组成部分，为AI原生应用提供了坚实的安全基础。在下一部分中，我们将深入探讨MCP的开发环境与工具链，帮助读者快速上手MCP开发。

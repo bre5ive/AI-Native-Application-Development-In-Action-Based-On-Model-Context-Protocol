@@ -1,4 +1,4 @@
-# AI 原生应用开发实战：基于 MCP 模型上下文协议  
+# AI 原生应用开发实战：基于 MCP 模型上下文协议
 
 AI Native Application Development In Action: Based On Model Context Protocol 
 
