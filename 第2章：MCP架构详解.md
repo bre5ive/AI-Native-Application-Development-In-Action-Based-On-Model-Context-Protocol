@@ -8097,6 +8097,643 @@ def read_resource(client, resource_id):
     if "error" in response:
         raise ResourceError(response["error"].get("message", "Unknown error"), response["error"].get("code", 0))
     
+    return response["result"]
+```
+
+#### 工具调用流程
+
+工具调用是MCP的另一个核心功能，客户端可以调用各种工具扩展其能力：
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Host
+    participant ToolServer
+    
+    Client->>Host: 工具调用请求(名称, 参数)
+    Host->>Host: 验证权限
+    Host->>ToolServer: 转发请求
+    ToolServer->>ToolServer: 执行工具
+    ToolServer->>Host: 返回执行结果
+    Host->>Client: 转发结果
+    
+    alt 异步执行
+        ToolServer->>Host: 进度通知
+        Host->>Client: 转发通知
+        ToolServer->>Host: 完成通知
+        Host->>Client: 转发通知
+    end
+```
+
+工具调用示例：
+
+```python
+def invoke_tool(client, tool_name, parameters, async_mode=False):
+    """调用工具"""
+    # 查找提供该工具的服务器
+    server_id = None
+    for sid, server_info in client.connected_servers.items():
+        capabilities = server_info.get("capabilities", {})
+        tools = capabilities.get("tools", [])
+        
+        for tool in tools:
+            if tool["name"] == tool_name:
+                server_id = sid
+                break
+        
+        if server_id:
+            break
+    
+    if not server_id:
+        raise ToolError(f"No server available for tool: {tool_name}")
+    
+    # 发送工具调用请求
+    request = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "invoke_tool",
+        "params": {
+            "name": tool_name,
+            "parameters": parameters,
+            "async": async_mode
+        },
+        "session": client.session["id"],
+        "target": server_id
+    }
+    
+    response_data = client.transport.send(json.dumps(request))
+    response = json.loads(response_data)
+    
+    if "error" in response:
+        raise ToolError(response["error"].get("message", "Unknown error"), response["error"].get("code", 0))
+    
+    if async_mode:
+        # 返回任务ID，客户端可以稍后查询状态
+        return response["result"]["task_id"]
+    else:
+        # 返回同步执行结果
+        return response["result"]["output"]
+```
+
+异步工具状态查询示例：
+
+```python
+def get_tool_status(client, task_id):
+    """获取工具执行状态"""
+    # 查找任务所属的服务器
+    # 实际实现中可能需要存储任务与服务器的映射
+    server_id = client.task_server_map.get(task_id)
+    if not server_id:
+        # 如果没有找到映射，尝试查询所有连接的服务器
+        for sid in client.connected_servers:
+            try:
+                status = query_task_status(client, sid, task_id)
+                # 如果成功获取状态，记录映射关系
+                client.task_server_map[task_id] = sid
+                return status
+            except:
+                continue
+        
+        raise TaskNotFoundError(f"Task not found: {task_id}")
+    
+    return query_task_status(client, server_id, task_id)
+
+def query_task_status(client, server_id, task_id):
+    """向特定服务器查询任务状态"""
+    request = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "get_tool_status",
+        "params": {
+            "task_id": task_id
+        },
+        "session": client.session["id"],
+        "target": server_id
+    }
+    
+    response_data = client.transport.send(json.dumps(request))
+    response = json.loads(response_data)
+    
+    if "error" in response:
+        raise ToolError(response["error"].get("message", "Unknown error"), response["error"].get("code", 0))
+    
+    return response["result"]
+```
+
+#### 通知处理流程
+
+MCP支持服务器向客户端发送通知，用于事件推送和状态更新：
+
+```mermaid
+sequenceDiagram
+    participant Server
+    participant Host
+    participant Client
+    
+    Server->>Host: 发送通知(事件, 数据)
+    Host->>Host: 确定目标客户端
+    Host->>Client: 转发通知
+    Client->>Client: 处理通知
+```
+
+通知发送示例：
+
+```python
+def send_notification(server, notification, target_sessions=None):
+    """发送通知给客户端"""
+    # 构建通知
+    notification_obj = {
+        "jsonrpc": "2.0",
+        "method": notification["method"],
+        "params": notification["params"],
+        "source": server.id
+    }
+    
+    # 添加目标会话
+    if target_sessions:
+        notification_obj["target_sessions"] = target_sessions
+    
+    # 发送通知
+    try:
+        server.transport.send_notification(json.dumps(notification_obj))
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send notification: {e}")
+        return False
+```
+
+主机处理通知示例：
+
+```python
+def handle_server_notification(host, notification, server_id):
+    """处理服务器发送的通知"""
+    # 确定目标会话
+    target_sessions = notification.get("target_sessions", [])
+    
+    if not target_sessions:
+        # 如果未指定目标会话，发送给所有连接了该服务器的会话
+        for session_id, session in host.sessions.items():
+            if "connected_servers" in session and server_id in session["connected_servers"]:
+                target_sessions.append(session_id)
+    
+    # 转发通知给目标会话
+    for session_id in target_sessions:
+        if session_id in host.sessions:
+            client_id = host.sessions[session_id]["client_id"]
+            if client_id in host.clients:
+                client_connection = host.clients[client_id]["connection"]
+                
+                # 添加会话ID
+                notification_with_session = copy.deepcopy(notification)
+                notification_with_session["session"] = session_id
+                
+                try:
+                    client_connection.send_notification(json.dumps(notification_with_session))
+                except Exception as e:
+                    logging.error(f"Failed to forward notification to client {client_id}: {e}")
+```
+
+客户端处理通知示例：
+
+```python
+def handle_notification(client, notification_data):
+    """处理接收到的通知"""
+    try:
+        notification = json.loads(notification_data)
+        
+        # 检查基本格式
+        if "jsonrpc" not in notification or notification["jsonrpc"] != "2.0" or "method" not in notification:
+            logging.warning(f"Received invalid notification: {notification_data}")
+            return
+        
+        method = notification["method"]
+        params = notification.get("params", {})
+        session_id = notification.get("session")
+        source = notification.get("source")
+        
+        # 检查会话
+        if session_id != client.session["id"]:
+            logging.warning(f"Received notification for different session: {session_id}")
+            return
+        
+        # 调用相应的处理器
+        handlers = []
+        
+        # 方法特定处理器
+        if method in client.notification_handlers:
+            handlers.extend(client.notification_handlers[method])
+        
+        # 源服务器特定处理器
+        if source and f"source:{source}" in client.notification_handlers:
+            handlers.extend(client.notification_handlers[f"source:{source}"])
+        
+        # 通用处理器
+        if "*" in client.notification_handlers:
+            handlers.extend(client.notification_handlers["*"])
+        
+        # 调用处理器
+        for handler in handlers:
+            try:
+                handler(notification)
+            except Exception as e:
+                logging.error(f"Error in notification handler: {e}")
+    except Exception as e:
+        logging.error(f"Failed to handle notification: {e}")
+```
+
+#### 会话管理
+
+在运行阶段，MCP需要管理会话的生命周期，包括会话创建、维护和关闭：
+
+```python
+def create_session(host, client_id, permissions=None):
+    """创建新会话"""
+    # 生成会话ID
+    session_id = f"session-{uuid.uuid4()}"
+    
+    # 创建会话
+    host.sessions[session_id] = {
+        "client_id": client_id,
+        "created_at": time.time(),
+        "last_activity": time.time(),
+        "state": "active",
+        "connected_servers": []
+    }
+    
+    # 设置权限
+    if permissions:
+        host.set_session_permissions(session_id, permissions)
+    else:
+        host.set_session_permissions(session_id, DEFAULT_PERMISSIONS)
+    
+    # 设置会话超时
+    session_timeout = host.config.get("session_timeout", 3600)  # 默认1小时
+    expires_at = time.time() + session_timeout
+    
+    logging.info(f"Created session {session_id} for client {client_id}")
+    
+    return {
+        "session_id": session_id,
+        "expires_at": expires_at
+    }
+
+def maintain_sessions(host):
+    """维护会话（清理过期会话）"""
+    current_time = time.time()
+    session_timeout = host.config.get("session_timeout", 3600)
+    
+    sessions_to_close = []
+    for session_id, session in host.sessions.items():
+        # 检查会话是否过期
+        if current_time - session["last_activity"] > session_timeout:
+            sessions_to_close.append(session_id)
+    
+    # 关闭过期会话
+    for session_id in sessions_to_close:
+        close_session(host, session_id)
+    
+    if sessions_to_close:
+        logging.info(f"Closed {len(sessions_to_close)} expired sessions")
+
+def close_session(host, session_id):
+    """关闭会话"""
+    if session_id not in host.sessions:
+        logging.warning(f"Attempt to close non-existent session: {session_id}")
+        return False
+    
+    session = host.sessions[session_id]
+    client_id = session["client_id"]
+    
+    # 通知连接的服务器
+    for server_id in session.get("connected_servers", []):
+        if server_id in host.servers:
+            server = host.servers[server_id]
+            try:
+                notification = {
+                    "jsonrpc": "2.0",
+                    "method": "session_closed",
+                    "params": {
+                        "session_id": session_id,
+                        "client_id": client_id
+                    }
+                }
+                server["connection"].send_notification(json.dumps(notification))
+            except Exception as e:
+                logging.error(f"Failed to notify server {server_id} about session closure: {e}")
+    
+    # 删除会话和权限
+    del host.sessions[session_id]
+    if session_id in host.permissions:
+        del host.permissions[session_id]
+    
+    logging.info(f"Closed session {session_id} for client {client_id}")
+    
+    return True
+```
+
+#### 错误处理
+
+MCP系统在运行阶段需要处理各种错误情况，包括通信错误、权限错误、资源错误等：
+
+```python
+def handle_error(error, context=None):
+    """处理错误"""
+    if isinstance(error, ConnectionError):
+        # 处理连接错误
+        logging.error(f"Connection error: {error}")
+        if context and "retry_count" in context:
+            if context["retry_count"] < MAX_RETRIES:
+                logging.info(f"Retrying connection ({context['retry_count'] + 1}/{MAX_RETRIES})...")
+                context["retry_count"] += 1
+                time.sleep(RETRY_DELAY * (2 ** context["retry_count"]))  # 指数退避
+                return "retry"
+        return "abort"
+    
+    elif isinstance(error, TimeoutError):
+        # 处理超时错误
+        logging.error(f"Timeout error: {error}")
+        if context and "retry_count" in context:
+            if context["retry_count"] < MAX_RETRIES:
+                logging.info(f"Retrying after timeout ({context['retry_count'] + 1}/{MAX_RETRIES})...")
+                context["retry_count"] += 1
+                return "retry"
+        return "abort"
+    
+    elif isinstance(error, PermissionError):
+        # 处理权限错误
+        logging.error(f"Permission error: {error}")
+        return "abort"
+    
+    elif isinstance(error, ResourceError):
+        # 处理资源错误
+        logging.error(f"Resource error: {error}")
+        return "abort"
+    
+    elif isinstance(error, ToolError):
+        # 处理工具错误
+        logging.error(f"Tool error: {error}")
+        return "abort"
+    
+    else:
+        # 处理其他错误
+        logging.error(f"Unexpected error: {error}")
+        return "abort"
+```
+
+### 2.4.3 关闭阶段
+
+关闭阶段是MCP系统终止运行的过程，包括资源释放、连接关闭和状态保存等操作。
+
+#### 客户端关闭
+
+客户端关闭过程包括关闭会话和断开连接：
+
+```python
+def close_client(client):
+    """关闭客户端"""
+    try:
+        # 关闭会话
+        if client.session:
+            close_session_request = {
+                "jsonrpc": "2.0",
+                "id": str(uuid.uuid4()),
+                "method": "close_session",
+                "params": {},
+                "session": client.session["id"]
+            }
+            
+            try:
+                client.transport.send(json.dumps(close_session_request))
+            except Exception as e:
+                logging.warning(f"Failed to send close session request: {e}")
+            
+            client.session = None
+        
+        # 清理资源
+        client.connected_servers = {}
+        client.resource_cache = {}
+        client.notification_handlers = {}
+        
+        # 断开连接
+        client.transport.disconnect()
+        
+        logging.info("Client closed successfully")
+        return True
+    except Exception as e:
+        logging.error(f"Error closing client: {e}")
+        return False
+```
+
+#### 服务器关闭
+
+服务器关闭过程包括注销服务器和断开连接：
+
+```python
+def close_server(server):
+    """关闭服务器"""
+    try:
+        # 注销服务器
+        if server.registered:
+            unregister_request = {
+                "jsonrpc": "2.0",
+                "id": str(uuid.uuid4()),
+                "method": "unregister_server",
+                "params": {
+                    "id": server.id
+                }
+            }
+            
+            try:
+                server.transport.send(json.dumps(unregister_request))
+            except Exception as e:
+                logging.warning(f"Failed to send unregister request: {e}")
+            
+            server.registered = False
+        
+        # 清理资源
+        for task_id, task in list(server.async_tasks.items()):
+            if task["status"] in ["running", "pending"]:
+                task["status"] = "cancelled"
+                task["completed_at"] = time.time()
+        
+        # 断开连接
+        server.transport.disconnect()
+        
+        logging.info(f"Server {server.id} closed successfully")
+        return True
+    except Exception as e:
+        logging.error(f"Error closing server: {e}")
+        return False
+```
+
+#### 主机关闭
+
+主机关闭过程包括关闭所有会话、断开所有连接和保存状态：
+
+```python
+def close_host(host):
+    """关闭主机"""
+    try:
+        # 关闭所有会话
+        for session_id in list(host.sessions.keys()):
+            close_session(host, session_id)
+        
+        # 通知所有服务器主机关闭
+        for server_id, server in host.servers.items():
+            try:
+                notification = {
+                    "jsonrpc": "2.0",
+                    "method": "host_shutdown",
+                    "params": {
+                        "reason": "normal_shutdown",
+                        "timestamp": time.time()
+                    }
+                }
+                server["connection"].send_notification(json.dumps(notification))
+            except Exception as e:
+                logging.warning(f"Failed to notify server {server_id} about shutdown: {e}")
+        
+        # 通知所有客户端主机关闭
+        for client_id, client in host.clients.items():
+            try:
+                notification = {
+                    "jsonrpc": "2.0",
+                    "method": "host_shutdown",
+                    "params": {
+                        "reason": "normal_shutdown",
+                        "timestamp": time.time()
+                    }
+                }
+                client["connection"].send_notification(json.dumps(notification))
+            except Exception as e:
+                logging.warning(f"Failed to notify client {client_id} about shutdown: {e}")
+        
+        # 保存状态（如果需要）
+        if host.config.get("save_state", False):
+            save_host_state(host)
+        
+        # 断开连接
+        host.transport.disconnect()
+        
+        logging.info("Host closed successfully")
+        return True
+    except Exception as e:
+        logging.error(f"Error closing host: {e}")
+        return False
+
+def save_host_state(host):
+    """保存主机状态"""
+    state_file = host.config.get("state_file", "host_state.json")
+    
+    state = {
+        "timestamp": time.time(),
+        "servers": {},
+        "sessions": {},
+        "permissions": {}
+    }
+    
+    # 保存服务器信息
+    for server_id, server in host.servers.items():
+        state["servers"][server_id] = {
+            "info": server["info"],
+            "capabilities": server["capabilities"],
+            "registered_at": server["registered_at"]
+        }
+    
+    # 保存会话信息
+    for session_id, session in host.sessions.items():
+        state["sessions"][session_id] = {
+            "client_id": session["client_id"],
+            "created_at": session["created_at"],
+            "last_activity": session["last_activity"],
+            "state": session["state"],
+            "connected_servers": session.get("connected_servers", [])
+        }
+    
+    # 保存权限信息
+    for session_id, permissions in host.permissions.items():
+        state["permissions"][session_id] = permissions
+    
+    # 写入文件
+    try:
+        with open(state_file, 'w') as f:
+            json.dump(state, f, indent=2)
+        logging.info(f"Host state saved to {state_file}")
+    except Exception as e:
+        logging.error(f"Failed to save host state: {e}")
+```
+
+#### 优雅关闭
+
+MCP系统支持优雅关闭，确保所有正在进行的操作能够完成或被适当取消：
+
+```python
+def graceful_shutdown(host, timeout=30):
+    """优雅关闭主机"""
+    logging.info(f"Initiating graceful shutdown with timeout {timeout}s")
+    
+    # 设置关闭标志
+    host.shutting_down = True
+    
+    # 停止接受新连接
+    host.transport.stop_accepting()
+    
+    # 通知所有连接的组件
+    for server_id, server in host.servers.items():
+        try:
+            notification = {
+                "jsonrpc": "2.0",
+                "method": "prepare_shutdown",
+                "params": {
+                    "timeout": timeout,
+                    "timestamp": time.time()
+                }
+            }
+            server["connection"].send_notification(json.dumps(notification))
+        except Exception as e:
+            logging.warning(f"Failed to notify server {server_id} about shutdown preparation: {e}")
+    
+    for client_id, client in host.clients.items():
+        try:
+            notification = {
+                "jsonrpc": "2.0",
+                "method": "prepare_shutdown",
+                "params": {
+                    "timeout": timeout,
+                    "timestamp": time.time()
+                }
+            }
+            client["connection"].send_notification(json.dumps(notification))
+        except Exception as e:
+            logging.warning(f"Failed to notify client {client_id} about shutdown preparation: {e}")
+    
+    # 等待正在进行的操作完成
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        # 检查是否还有活跃的操作
+        active_operations = host.get_active_operations_count()
+        if active_operations == 0:
+            logging.info("All operations completed, proceeding with shutdown")
+            break
+        
+        logging.info(f"Waiting for {active_operations} active operations to complete")
+        time.sleep(1)
+    
+    # 关闭主机
+    close_host(host)
+```
+
+## 本章小结
+
+本章深入探讨了MCP的架构设计和核心组件，为读者提供了全面的技术理解。我们首先介绍了MCP的基础架构，包括客户端-主机-服务器模型、JSON-RPC 2.0通信规范和多种传输层实现。这种三层架构设计实现了关注点分离、松耦合设计、可组合性和安全隔离，为AI原生应用提供了坚实的基础架构。
+
+接着，我们详细解析了MCP的三个核心组件：主机、客户端和服务器。主机作为中心枢纽，负责协调客户端和服务器之间的通信，管理会话和权限，以及提供各种核心服务。客户端负责发起请求并处理响应，通过MCP主机与各种服务器交互，访问资源和工具。服务器则提供特定的资源或功能，处理客户端请求，并可能主动发送通知。
+
+然后，我们探讨了MCP的三种核心能力：资源管理、工具集成和提示模板。资源管理提供了统一的资源抽象和操作接口，简化了AI模型与外部世界的交互。工具集成提供了标准化的工具发现和调用接口，使AI模型能够轻松使用各种工具扩展其能力。提示模板提供了结构化的模板，用于指导模型生成特定格式或内容的输出。
+
+最后，我们分析了MCP的生命周期和交互流程，从初始化到运行再到关闭的全过程。初始化阶段包括组件初始化、连接建立、能力声明和权限设置。运行阶段是系统的主要工作阶段，包括请求处理、资源访问、工具调用和通知处理等过程。关闭阶段则包括资源释放、连接关闭和状态保存等操作，确保系统能够优雅地终止运行。
+
+通过本章的学习，读者应该已经对MCP的架构设计和核心组件有了全面的理解，为后续开发实践打下了坚实的基础。在下一章中，我们将深入探讨MCP的安全与隐私保护机制，包括安全架构、数据隐私保护策略以及审计与合规措施。
         
         
     
